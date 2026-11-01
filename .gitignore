@@ -6,3 +6,5 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+TrainAlarm.app/
+mujvlak/.mujvlak_device_id

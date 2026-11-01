@@ -1,0 +1,3932 @@
+openapi: 3.0.3
+info:
+  title: Můj vlak (My Train) — Reverse-Engineered API
+  version: 2.16.1 (build 332)
+  description: |
+    OpenAPI specification of the HTTP APIs used by the Android app
+    **Můj vlak / My Train** (`cz.cd.mujvlak.an`, České dráhy, version 2.16.1),
+    recovered by decompiling the APK with apktool 3.0.3 and jadx 1.5.6.
+
+    The app talks to four distinct back-ends:
+
+    | # | Back-end | Purpose | Base URL (production) |
+    |---|----------|---------|----------------------|
+    | A | **MapPhone Server** (`MapPhoneServerWS`, ODP/ČD) | User accounts, IN-Karta/ČD-kredit, ticket purchase & sync, parking, payment initiation | `https://mapphone.cd.cz/MapPhoneServerWS.svc/` |
+    | B | **IPWS** (CHAPS/Circlegate "InterProduct WebService") | Timetable search (CRWS), e-shop buy process, user sessions, tickets, refunds, ČD Bike, SMS tickets | `https://ipws.cdis.cz` |
+    | C | **CGWS** (Circlegate Android Service) | Offline timetable catalogue download, version checks | `https://cd-ws.circlegate.com/AndroidService.svc` |
+    | D | **Circlegate support WS** | Problem/user-support report upload | `https://wsandroid.circlegate.com/ServiceContractV7.svc` |
+
+    ### General notes
+    * All four services exchange **JSON** (`Content-Type: application/json; charset=utf-8`).
+    * MapPhone uses **PascalCase** JSON field names (Gson `@SerializedName`).
+    * IPWS/CGWS use Hungarian-notation field names (`s…` string, `i…` int, `o…` object, `ao…` object array, `as…` string array, `b…` bool, `dt…` ISO date-time).
+    * All clients are plain OkHttp; the IPWS/CGWS clients are built with a
+      **trust-all SSL context** (certificate pinning is not used).
+    * Schemas marked *(partial)* could not be fully reconstructed from the decompiled code.
+
+    ### Error codes (observed live, 2026-09)
+    IPWS business errors arrive as HTTP 500 + `{"ExceptionType": "", "Message": "<code> <text>"}`
+    (the app treats HTTP 500 as a valid response — `IpwsCommon$IpwsParam.isResponseCodeAcceptable`).
+
+    | Code | Message (cs) | Meaning |
+    |------|--------------|---------|
+    | 10000 | Neautorizovaný přístup. | **Client gate** — request rejected before login logic; observed when the `sAppID` GUID is not the currently-published app's GUID (old releases are blocked). Not a credentials problem. |
+    | 10121 | Zadali jste nesprávný e-mail nebo heslo. | Wrong e-mail or password (normal business error from `Login1`). |
+
+    Unknown/unimplemented commands return a plain HTTP 404; GET on a command
+    endpoint returns 405 (only POST is accepted).
+
+externalDocs:
+  description: Decompiled source of the app (jadx output)
+  url: https://github.com/ceskedrahy (see decompiled sources in jadx-out/sources)
+
+servers:
+  # ---- A: MapPhone Server (ČD) ----
+  - url: https://mapphone.cd.cz/MapPhoneServerWS.svc/
+    description: MapPhone production (used by release builds)
+    x-server-id: mapphone
+  - url: https://cma.odp.cz/mapphoneservercd/
+    description: MapPhone test (AZAK2)
+    x-server-id: mapphone-test
+  - url: https://mapphone-test.cd.cz/MapPhoneServerWS.svc/
+    description: MapPhone test (AZAK3)
+    x-server-id: mapphone-test2
+  # ---- B: IPWS ----
+  - url: https://ipws.cdis.cz
+    description: IPWS production (timetable + e-shop)
+    x-server-id: ipws
+  - url: https://ipws-test.cdis.cz
+    description: IPWS test
+    x-server-id: ipws-test
+  - url: https://ipws.timetable.cz
+    description: IPWS test (AZAK2)
+    x-server-id: ipws-tt
+  - url: https://ipwsv16.chaps.cz
+  - url: https://ipwsv32.chaps.cz
+  - url: https://ipwsv32-2.chaps.cz
+  - url: https://ipwsv32prod.chaps.cz:10432
+    description: Internal production v32
+  # ---- C: CGWS ----
+  - url: https://cd-ws.circlegate.com/AndroidService.svc
+    x-server-id: cgws
+  # ---- D: support WS ----
+  - url: https://wsandroid.circlegate.com/ServiceContractV7.svc
+    x-server-id: support
+
+tags:
+  - name: MapPhone – Account & Devices
+    description: Registration, account binding, PIN, account deletion, push registration.
+  - name: MapPhone – Identity Pack (IN-Karta)
+    description: Digital identity pack / photo / IN-Karta info.
+  - name: MapPhone – Catalogue & Products
+    description: Sortiment (product catalogue), journey profiles, parking info.
+  - name: MapPhone – Journey & Tickets
+    description: Journey computation, CRWS connection search, ticket purchase.
+  - name: MapPhone – Payment
+    description: Payment via CSOB gateway / Masterpass / ODIS / IDP.
+  - name: MapPhone – Sync
+    description: Product (ticket) synchronisation and support endpoints.
+  - name: IPWS – Session & Login
+    description: IPWS session lifecycle and user login/registration.
+  - name: IPWS – Journeys
+    description: Timetable connection search and detail.
+  - name: IPWS – Stations & Trains
+    description: Station and train info.
+  - name: IPWS – Buy Process
+    description: Ticket purchase session (price offers, passengers, extras, seat reservation).
+  - name: IPWS – Payments & Refunds
+    description: Common payment flow and ticket refunds.
+  - name: IPWS – Tickets
+    description: Ticket synchronisation, shared/SMS tickets, activations.
+  - name: IPWS – IN-Karta
+    description: IN-Karta pairing and ČD-kredit / commuter ticket products.
+  - name: IPWS – Notifications
+    description: Push registration for train/connection notifications.
+  - name: IPWS – Misc
+    description: Side-buy, ČD Bike, NaKlik cards, agreements, customer satisfaction…
+  - name: CGWS
+    description: Circlegate AndroidService (offline timetable, version check).
+  - name: Support WS
+    description: Problem report upload.
+
+paths:
+  # =====================================================================
+  # A) MapPhoneServerWS  (paths are relative to .../MapPhoneServerWS.svc/)
+  # =====================================================================
+
+  /ping:
+    get:
+      tags: [MapPhone – Sync]
+      summary: Liveness check
+      operationId: ping
+      responses:
+        '200':
+          description: Server is reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MapPhoneStatusResult'
+
+  /mobileAppVersions:
+    get:
+      tags: [MapPhone – Sync]
+      summary: Minimum/recommended app versions per platform
+      operationId: mobileAppVersions
+      responses:
+        '200':
+          description: Version catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/MobileAppVersion' }
+
+  /bindAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Bind (login) an existing account to this device — returns account public key
+      operationId: bindAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BindAccountInput' } } }
+      responses:
+        '200':
+          description: Bind result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindAccountResult'
+
+  /newAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Register a new (not yet confirmed) account; a confirmation e-mail is sent
+      operationId: newAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewAccountInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /confirmAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Confirm account registration with the code from the confirmation e-mail
+      operationId: confirmAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ConfirmAccountInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /newConfirmedAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Create a fully-confirmed account directly (with identity pack data)
+      operationId: newConfirmedAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewConfirmedAccountInput' } } }
+      responses:
+        '200':
+          description: Created account info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PublicKeyXML: { type: string, description: 'XML-encoded RSA public key for offline ticket signing'}
+                  UserName: { type: string }
+                  Email: { type: string }
+                  EndOfValidity: { type: string, description: 'yyyy-MM-dd or yyyyMMdd' }
+
+  /deleteAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Delete account bound to this device (requires PIN)
+      operationId: deleteAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/DeleteAccountInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /changePIN:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Change account PIN
+      operationId: changePIN
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ChangePINInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /forgottenPIN:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Reset forgotten PIN (delivery method chosen via `User`/`Password` params)
+      operationId: forgottenPIN
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ForgottenPINInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /updatePushDeviceId:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Register FCM push token for the account
+      operationId: updatePushDeviceId
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdatePushDeviceIdInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /idsokCreateUser:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Create user in IDSOK (integrated IdS OK system, e.g. regional operator)
+      operationId: idsokCreateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Email, UserPassword]
+              properties:
+                Email: { type: string }
+                UserPassword: { type: string }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /idsokBindExisting:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Bind existing IDSOK account via token
+      operationId: idsokBindExisting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                DeviceID: { type: string }
+                DeviceInfo: { type: string }
+                Email: { type: string }
+                PhoneName: { type: string }
+                PIN: { type: string }
+                PushDeviceID: { type: string }
+                Token: { type: string }
+      responses:
+        '200':
+          description: Bind result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PublicKeyXML: { type: string }
+                  UserName: { type: string }
+
+  /idsokDeleteAccount:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Delete IDSOK account
+      operationId: idsokDeleteAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevicePinAccountInput'
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /ikBindExisting:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Bind existing IN-Karta (card number + password) to the device
+      operationId: ikBindExisting
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/IkBindExistingInput' } } }
+      responses:
+        '200':
+          description: Bind result
+          content: { application/json: { schema: { $ref: '#/components/schemas/BindAccountResult' } } }
+
+  /ikGetInfo:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Query IN-Karta capabilities (discounts available on the card)
+      operationId: ikGetInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, IDK]
+              properties:
+                DeviceID: { type: string }
+                IDK: { type: string, description: 'IN-Karta card number'}
+      responses:
+        '200':
+          description: Card capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  HasEP: { type: boolean, description: "e-peněženka (e-wallet) present" }
+                  HasISIC: { type: boolean, description: 'ISIC card present'}
+                  HasZP: { type: boolean, description: "zákaznický program (loyalty) present" }
+                  TransferToVIKAllowed: { type: boolean }
+
+  /odisBindExisting:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Bind existing ODIS (IDSK/MHD) account via user token
+      operationId: odisBindExisting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                DeviceID: { type: string }
+                DeviceInfo: { type: string }
+                PushDeviceID: { type: string }
+                UserToken: { type: string }
+      responses:
+        '200':
+          description: Bind result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PublicKeyXML: { type: string }
+
+  /pmdpBindExisting:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Bind existing "PMDP" (Plzeň PMDP) account — returns OAuth-like tokens
+      operationId: pmdpBindExisting
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PmdpBindExistingInput' } } }
+      responses:
+        '200':
+          description: Bind result
+          content: { application/json: { schema: { $ref: '#/components/schemas/PmdpBindExistingResult' } } }
+
+  /pmdpRefreshAccessToken:
+    post:
+      tags: [MapPhone – Account & Devices]
+      summary: Refresh PMDP access token
+      operationId: pmdpRefreshAccessToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [UserName, RefreshToken]
+              properties:
+                UserName: { type: string }
+                RefreshToken: { type: string }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  AccessToken: { type: string }
+                  RefreshToken: { type: string }
+
+  # ---------------- Identity Pack ----------------
+
+  /setIdentityPack:
+    post:
+      tags: [MapPhone – Identity Pack (IN-Karta)]
+      summary: Upload/replace the identity pack (photo + holder data)
+      operationId: setIdentityPack
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SetIdentityPackInput' } } }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  /compressPhoto:
+    post:
+      tags: [MapPhone – Identity Pack (IN-Karta)]
+      summary: Server-side downscale of a base64 JPEG photo
+      operationId: compressPhoto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [PhotoHQ]
+              properties:
+                PhotoHQ: { type: string, description: 'Base64-encoded high-quality photo'}
+      responses:
+        '200':
+          description: Compressed photo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PhotoLQ: { type: string, description: 'Base64-encoded low-quality photo'}
+
+  /resendIdentityPackCard:
+    post:
+      tags: [MapPhone – Identity Pack (IN-Karta)]
+      summary: Re-send (re-download) the identity-pack card
+      operationId: resendIdentityPackCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, UserName]
+              properties:
+                DeviceID: { type: string }
+                UserName: { type: string }
+      responses:
+        '200':
+          description: Status
+          content: { application/json: { schema: { $ref: '#/components/schemas/MapPhoneStatusResult' } } }
+
+  # ---------------- Catalogue ----------------
+
+  /getSortiment:
+    post:
+      tags: [MapPhone – Catalogue & Products]
+      summary: Product catalogue (ticket templates grouped by category)
+      operationId: getSortiment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID]
+              properties:
+                DeviceID: { type: string }
+                Tags: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Catalogue groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Groups:
+                    type: array
+                    items: { $ref: '#/components/schemas/SortimentGroup' }
+
+  /getExternalSortiment:
+    post:
+      tags: [MapPhone – Catalogue & Products]
+      summary: "External products (third-party tickets by tag)"
+      operationId: getExternalSortiment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID]
+              properties:
+                DeviceID: { type: string }
+                Tags: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ExternalSortimentItem' }
+
+  /supportedPaymentMethods:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Payment methods supported for the user
+      operationId: supportedPaymentMethods
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                DeviceID: { type: string }
+                Username: { type: string }
+      responses:
+        '200':
+          description: Method codes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Methods: { type: array, items: { type: string } }
+
+  /supportedRozcestnik:
+    post:
+      tags: [MapPhone – Catalogue & Products]
+      summary: "Rozcestník (integrated-ticket gateway) items supported for the user"
+      operationId: supportedRozcestnik
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                DeviceID: { type: string }
+                Username: { type: string }
+      responses:
+        '200':
+          description: Item codes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Items: { type: array, items: { type: string } }
+
+  /getParkingInfo:
+    post:
+      tags: [MapPhone – Catalogue & Products]
+      summary: Parking zones, opening hours and tariff intervals (P+R)
+      operationId: getParkingInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID]
+              properties:
+                DeviceID: { type: string }
+      responses:
+        '200':
+          description: Parking zones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Zones:
+                    type: array
+                    items: { $ref: '#/components/schemas/ParkingZone' }
+
+  /getJourneyProfiles:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Journey (kilometric ticket) price profiles
+      operationId: getJourneyProfiles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID]
+              properties:
+                DeviceID: { type: string }
+      responses:
+        '200':
+          description: Profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Profiles:
+                    type: array
+                    items: { $ref: '#/components/schemas/JourneyProfileItem' }
+
+  # ---------------- Journeys & CRWS ----------------
+
+  /findJourneyStations:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Station autocomplete for kilometric tickets
+      operationId: findJourneyStations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, SearchInput]
+              properties:
+                DeviceID: { type: string }
+                SearchInput: { type: string }
+      responses:
+        '200':
+          description: Stations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Stations:
+                    type: array
+                    items: { $ref: '#/components/schemas/JourneyStationItem' }
+
+  /computeJourney:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Compute price for a kilometric (profile-based) journey
+      operationId: computeJourney
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ComputeJourneyInput' } } }
+      responses:
+        '200':
+          description: Computed journey
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComputeJourneyResult' }
+
+  /newJourneyTicket:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Create (buy) a kilometric journey ticket — returns transaction id
+      operationId: newJourneyTicket
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewJourneyTicketInput' } } }
+      responses:
+        '200':
+          description: Transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  TransactionID: { type: string }
+
+  /findCrwsJourneyStations:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Station/timetable-object autocomplete for CRWS connections
+      operationId: findCrwsJourneyStations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, SearchInput]
+              properties:
+                DeviceID: { type: string }
+                SearchInput: { type: string }
+      responses:
+        '200':
+          description: Timetable objects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Stations:
+                    type: array
+                    items: { $ref: '#/components/schemas/TMapyTimetableObjectInfo' }
+
+  /searchCrwsConnections:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Search CRWS connections and fill prices (IDOS-like)
+      operationId: searchCrwsConnections
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SearchCrwsConnectionsInput' } } }
+      responses:
+        '200':
+          description: Connection page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result: { $ref: '#/components/schemas/TMapyFillConnectionPricesMessage' }
+
+  /crwsGetConnectionPage:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Paging over CRWS search results
+      operationId: crwsGetConnectionPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [HandleID, PrevConn, ConnID, CombID]
+              properties:
+                HandleID: { type: integer, description: 'Search handle'}
+                PrevConn: { type: boolean }
+                ConnID: { type: integer }
+                CombID: { type: string }
+      responses:
+        '200':
+          description: Connection list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result: { $ref: '#/components/schemas/TMapyConnectionListInfo' }
+
+  /newCrwsJourneyTicket:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Buy a CRWS single ticket for a found connection
+      operationId: newCrwsJourneyTicket
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewCrwsJourneyTicketInput' } } }
+      responses:
+        '200':
+          description: Transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  TransactionID: { type: string }
+
+  # ---------------- IDP (integrated/regional tickets) ----------------
+
+  /idpSearchStations:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Search IDP stops (integrated transport zones)
+      operationId: idpSearchStations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, Pattern, ZoneType, Limit]
+              properties:
+                DeviceID: { type: string }
+                Pattern: { type: string }
+                ZoneType: { type: integer }
+                Limit: { type: integer }
+      responses:
+        '200':
+          description: Stops (see IDPStationItem)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result: { $ref: '#/components/schemas/IdpSearchStationsResultValue' }
+
+  /idpGetTariffs:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: IDP tariff list for a zone type / tariff provider
+      operationId: idpGetTariffs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, Typ, TP]
+              properties:
+                DeviceID: { type: string }
+                Typ: { type: integer }
+                TP: { type: integer }
+      responses:
+        '200':
+          description: Tariffs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result:
+                    type: object
+                    properties:
+                      Items: { type: array, items: { $ref: '#/components/schemas/IDPTariffItem' } }
+
+  /idpGetZona2Zona:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Zone-to-zone fare options
+      operationId: idpGetZona2Zona
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, IDZonaFrom, IDZonaTo]
+              properties:
+                DeviceID: { type: string }
+                IDZonaFrom: { type: integer }
+                IDZonaTo: { type: integer }
+      responses:
+        '200':
+          description: Zone options
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result:
+                    type: object
+                    properties:
+                      Items: { type: array, items: { $ref: '#/components/schemas/IDPZona2ZonaItem' } }
+
+  /idpComputeJIJFare:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Compute JIJ (jump-on-jump-off / time-ticket) fare
+      operationId: idpComputeJIJFare
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, PurchaseInfo]
+              properties:
+                DeviceID: { type: string }
+                PurchaseInfo: { $ref: '#/components/schemas/IdpJIJTicketPurchaseInfo' }
+      responses:
+        '200':
+          description: Fare result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Result: { $ref: '#/components/schemas/IdpComputeJIJFareValue' }
+
+  /idpNewJIJTicket:
+    post:
+      tags: [MapPhone – Journey & Tickets]
+      summary: Buy JIJ ticket
+      operationId: idpNewJIJTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, PurchaseInfo, PaymentInfo]
+              properties:
+                DeviceID: { type: string }
+                PurchaseInfo: { $ref: '#/components/schemas/IdpJIJTicketPurchaseInfo' }
+                PaymentInfo: { $ref: '#/components/schemas/PaymentInfo' }
+      responses:
+        '200':
+          description: Payment redirect info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PaymentResultInfo: { $ref: '#/components/schemas/PaymentResultInfo' }
+
+  # ---------------- Purchase / payment (MapPhone) ----------------
+
+  /newProductViaMasterPass:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Buy catalogue product, paid via Masterpass
+      operationId: newProductViaMasterPass
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, ProductTemplateID, PaymentInfo]
+              properties:
+                DeviceID: { type: string }
+                ProductTemplateID: { type: string }
+                PaymentInfo: { $ref: '#/components/schemas/PaymentInfo' }
+      responses:
+        '200':
+          description: Payment redirect info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PaymentResultInfo: { $ref: '#/components/schemas/PaymentResultInfo' }
+
+  /newExternalProduct:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Buy external product by template id
+      operationId: newExternalProduct
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewExternalProductInput' } } }
+      responses:
+        '200':
+          description: Payment redirect info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PaymentResultInfo: { $ref: '#/components/schemas/PaymentResultInfo' }
+
+  /odisNewProduct:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Buy an ODIS product (product defined by JSON blob from ODIS app)
+      operationId: odisNewProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, UserToken, ProductJSON, PaymentInfo]
+              properties:
+                DeviceID: { type: string }
+                UserToken: { type: string }
+                ProductJSON: { type: string, description: 'ODIS product definition JSON'}
+                PaymentInfo: { $ref: '#/components/schemas/PaymentInfo' }
+      responses:
+        '200':
+          description: Payment redirect info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  PaymentResultInfo: { $ref: '#/components/schemas/PaymentResultInfo' }
+
+  /newParkingViaMasterpass:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Pay for a parking session via Masterpass
+      operationId: newParkingViaMasterpass
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NewParkingViaMasterpassInput' } } }
+      responses:
+        '200':
+          description: Transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  TransactionID: { type: string }
+
+  /refundProduct:
+    post:
+      tags: [MapPhone – Payment]
+      summary: Cancel/refund a purchased product
+      operationId: refundProduct
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RefundProductInput' } } }
+      responses:
+        '200':
+          description: Refund result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  ErrorMessage: { type: string, nullable: true }
+                  Method: { type: string, nullable: true, description: 'Refund method (e.g. back to card / CD-kredit)'}
+
+  # ---------------- Sync & misc ----------------
+
+  /syncProducts:
+    post:
+      tags: [MapPhone – Sync]
+      summary: >
+        Incremental synchronisation of purchased products (offline tickets).
+        Returns signed product blobs, identity pack and VIS records.
+      operationId: syncProducts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [DeviceID, UserName, QRVersion]
+              properties:
+                DeviceID: { type: string }
+                UserName: { type: string }
+                Timestamp:
+                  type: string
+                  nullable: true
+                  description: 'Last sync time, format yyyyMMddHHmmss'
+                Tags: { type: array, items: { type: string } }
+                QRVersion: { type: integer }
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+                  Timestamp: { type: string, description: 'yyyyMMddHHmmss' }
+                  Email: { type: string, nullable: true }
+                  IdentityPack: { type: string, nullable: true, description: 'Base64-encoded identity pack'}
+                  PhotoHQ: { type: string, nullable: true, description: 'Base64 photo'}
+                  ConfirmationMessage: { type: string, nullable: true }
+                  ConfirmationWhen: { type: string, nullable: true, description: 'yyyyMMddHHmmss' }
+                  AdditionalInfo: { type: string, nullable: true }
+                  Products:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProductSync' }
+
+
+  # =====================================================================
+  # B) IPWS — every call is POST {baseUrl}/IP.svc/{Command}
+  # =====================================================================
+
+  /IP.svc/CreateSession:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: Create IPWS session (auto-called when sSessionID missing; also logs the user in)
+      operationId: ipwsCreateSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IpwsCreateSessionRequest' }
+      responses:
+        '200':
+          description: 'Session info (envelope "{d: …}")'
+          content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionResponse' } } }
+
+  /IP.svc/Login:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: Login with credentials (legacy)
+      operationId: ipwsLogin
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/Login1:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: >
+        Login with e-mail + password; reports accepted agreement versions.
+        This is the app's standard login: call CreateSession anonymously first
+        (sUser="", sPwd=""), then authenticate with Login1 on the returned
+        sSessionID (LoginActivity.executeTask "TASK_LOGIN").
+      operationId: ipwsLogin1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sUser: { type: string, description: 'e-mail'}
+                    sPwd: { type: string }
+                    sUserDesc: { $ref: '#/components/schemas/IpwsUserDesc' }
+                    oAgreementVersions: { $ref: '#/components/schemas/IpwsAgreementVersions' }
+      responses:
+        '200':
+          description: |
+            User account detail (envelope `{d: …}`). On wrong credentials the
+            server responds HTTP 500 with error `10121 Zadali jste nesprávný
+            e-mail nebo heslo.` ("you entered a wrong e-mail or password").
+
+  /IP.svc/Register:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: Register a new user account (e-mail, name, surname)
+      operationId: ipwsRegister
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    oRegistrationInfo:
+                      type: object
+                      properties:
+                        sEmail: { type: string }
+                        sFirstName: { type: string }
+                        sSurname: { type: string }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/Logoff:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: End session / log off user
+      operationId: ipwsLogoff
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetUserAccountDetail:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: Full user account detail (login info, IN-Karta list, agreements, avatar)
+      operationId: ipwsGetUserAccountDetail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sAvatarUrl: { type: string }
+                    oAgreementVersions: { $ref: '#/components/schemas/IpwsAgreementVersions' }
+      responses:
+        '200': { description: Account detail, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ResetPassword:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: Request password reset
+      operationId: ipwsResetPassword
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchConnectionInfo1:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Search connections (main timetable query)
+      operationId: ipwsSearchConnectionInfo1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    oFrom: { $ref: '#/components/schemas/IpwsPlaceId' }
+                    oTo: { $ref: '#/components/schemas/IpwsPlaceId' }
+                    aoVia: { type: array, items: { $ref: '#/components/schemas/IpwsPlaceVia' } }
+                    aoChange: { type: array, items: { $ref: '#/components/schemas/IpwsPlaceVia' } }
+                    dtDateTime: { type: string, format: date-time }
+                    bIsDep: { type: boolean, description: 'true = departure time, false = arrival' }
+                    iMaxCount: { type: integer }
+                    iMaxObjectsCount: { type: integer }
+                    oConnParms: { $ref: '#/components/schemas/IpwsSearchConnectionParams' }
+                    oPriceRequestClass: { $ref: '#/components/schemas/IpwsPriceRequestClass' }
+                    aoPassengers: { type: array, items: { $ref: '#/components/schemas/IpwsPriceRequestPassenger' } }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200':
+          description: Connection list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      aoConnections: { type: array, items: { $ref: '#/components/schemas/IpwsConnectionInfo' } }
+                      bAllowNext: { type: boolean }
+                      bAllowPrev: { type: boolean }
+
+  /IP.svc/GetConnectionsPage:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Previous/next page of connection search results
+      operationId: ipwsGetConnectionsPage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iHandle: { type: integer }
+                    iConnID: { type: integer }
+                    bPrevConn: { type: boolean }
+                    iListedConnCount: { type: integer }
+                    iMaxCount: { type: integer }
+                    iSearchConnectionFlags: { type: integer }
+                    dtFromDepartLowerBound: { type: string, nullable: true }
+                    dtFromDepartUpperBound: { type: string, nullable: true }
+                    dtToArriveUpperBound: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Connection page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d: { $ref: '#/components/schemas/IpwsConnectionList' }
+
+  /IP.svc/EditConnection:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Detail of one journey (train sequence) from a result set
+      operationId: ipwsEditConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    oConnParms: { $ref: '#/components/schemas/IpwsPlaceId' }
+                    sDesc: { type: string }
+                    oFrom: { $ref: '#/components/schemas/IpwsPlaceId' }
+                    oTo: { $ref: '#/components/schemas/IpwsPlaceId' }
+                    aoVia: { type: array, items: { $ref: '#/components/schemas/IpwsPlaceVia' } }
+                    aoChange: { type: array, items: { $ref: '#/components/schemas/IpwsPlaceVia' } }
+                    iTrainIndex: { type: integer }
+                    bNext: { type: boolean }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Journey detail, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetConnection:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Get one connection (by id/handle) incl. optional price request
+      operationId: ipwsGetConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iConnID: { type: integer }
+                    iHandle: { type: integer }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Connection, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetConnectionsPrice:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Batch price computation for connections
+      operationId: ipwsGetConnectionsPrice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    aiConnID: { type: array, items: { type: integer } }
+                    iHandle: { type: integer }
+                    bStopIfAgeError: { type: boolean }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Prices, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/MapConnectionAuxDesc:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Map auxiliary connection by description
+      operationId: ipwsMapConnectionAuxDesc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sDesc: { type: string }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/MapRequestedConnection:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Map a saved/requested connection by its id
+      operationId: ipwsMapRequestedConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sRcId: { type: string }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Connection, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterRequestedConnection:
+    post:
+      tags: [IPWS – Journeys]
+      summary: Create a request for a "required connection" (e.g. for compensations)
+      operationId: ipwsRegisterRequestedConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sDesc: { type: string }
+                    iTrainIndex: { type: integer }
+                    iPassengersCount: { type: integer }
+                    asTransactionCodes: { type: array, items: { type: string } }
+                    oPriceRequest: { $ref: '#/components/schemas/IpwsPriceRequest' }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetStationInfo:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Station detail
+      operationId: ipwsGetStationInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    iStationKey: { type: integer }
+      responses:
+        '200': { description: Station info, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetStationTableInfo1:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Departures/arrivals board of a station
+      operationId: ipwsGetStationTableInfo1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    iStationKey: { type: integer }
+                    bIsDep: { type: boolean }
+                    bForWidget: { type: boolean }
+                    bLast24Hours: { type: boolean }
+                    bNext24Hours: { type: boolean }
+                    iMaxCountDefault: { type: integer }
+      responses:
+        '200': { description: Station table, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetIdsStationTableInfo:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: IDS (integrated system) station board
+      operationId: ipwsGetIdsStationTableInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    iStationKey: { type: integer }
+                    iIdsTableIndex: { type: integer }
+      responses:
+        '200': { description: IDS station table, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchStations:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Station search by mask
+      operationId: ipwsSearchStations
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsBaseEnvelope' } } } }
+      responses:
+        '200': { description: Stations, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchStationsInCircle:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Stations within a circle
+      operationId: ipwsSearchStationsInCircle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    dCoorX: { type: number, description: 'longitude'}
+                    dCoorY: { type: number, description: 'latitude'}
+                    iCircleRadius: { type: integer }
+                    iMaxCount: { type: integer }
+      responses:
+        '200': { description: Stations, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchStationsInRegion:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Stations in a region / by service
+      operationId: ipwsSearchStationsInRegion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    sRegion: { type: string }
+                    sService: { type: string }
+                    bForStationInfo: { type: boolean }
+                    dCoorX: { type: number }
+                    dCoorY: { type: number }
+                    iMaxCount: { type: integer }
+                    iCircleMinCount: { type: integer }
+                    iCircleMaxCount: { type: integer }
+                    iCircleRadius0: { type: integer }
+                    iCircleRadius1: { type: integer }
+      responses:
+        '200': { description: Stations, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchTrainInfo:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Train number autocomplete
+      operationId: ipwsSearchTrainInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    sMask: { type: string }
+                    dtDate: { type: string }
+                    iMaxCount: { type: integer }
+      responses:
+        '200': { description: Trains, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTrainDataInfo1:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Train detail (from vehicle/annotation view)
+      operationId: ipwsGetTrainDataInfo1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    iTTIndex: { type: integer }
+                    iTrain: { type: integer }
+                    iStationKey: { type: integer }
+                    bIsArr: { type: boolean }
+                    bRelation: { type: boolean }
+                    dtDate: { type: string }
+                    iFlags: { type: integer }
+                    iOrderingStationIndexDefaultZero: { type: integer }
+                    sCombID: { type: string }
+                    sDesc: { type: string }
+      responses:
+        '200': { description: Train data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTrainDataInfo2:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Train detail (from journey)
+      operationId: ipwsGetTrainDataInfo2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    iConnID: { type: integer }
+                    iHandle: { type: integer }
+                    iConnTrain: { type: integer }
+                    iTrain: { type: integer }
+                    iFlags: { type: integer }
+                    iOrderingStationIndexDefaultZero: { type: integer }
+      responses:
+        '200': { description: Train data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTrainDataInfo3:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Train detail (from notification, with map size)
+      operationId: ipwsGetTrainDataInfo3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    sTrainID: { type: string }
+                    iMapWidth: { type: integer }
+                    iMapHeight: { type: integer }
+      responses:
+        '200': { description: Train data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchGlobalListItemInfoExt:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Global list-item (place) autocomplete
+      operationId: ipwsSearchGlobalListItemInfoExt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    sMask: { type: string }
+                    iMaxCount: { type: integer }
+                    sAppID: { type: string }
+                    sUserDesc: { type: string }
+      responses:
+        '200': { description: Places, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchGlobalListItemInfoSideBuy:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Place autocomplete restricted to side-buy (on-board sales)
+      operationId: ipwsSearchGlobalListItemInfoSideBuy
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/IpwsBaseEnvelope' } } }
+      responses:
+        '200': { description: Places, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SearchGlobalListItemInfoSideBuyInCircle:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Side-buy places within a circle
+      operationId: ipwsSearchGlobalListItemInfoSideBuyInCircle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    dCoorX: { type: number }
+                    dCoorY: { type: number }
+                    iCircleRadius: { type: integer }
+                    iMaxCount: { type: integer }
+                    sAppID: { type: string }
+                    sUserDesc: { type: string }
+      responses:
+        '200': { description: Places, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/TryFindGlobalListItemInfoExt:
+    post:
+      tags: [IPWS – Stations & Trains]
+      summary: Try to resolve pasted text into known list items
+      operationId: ipwsTryFindGlobalListItemInfoExt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    sAppID: { type: string }
+                    sUserDesc: { type: string }
+                    aoItem: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Resolved items, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetMobileAppInfo:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Mobile app info — alerts and notification settings; sends usage statistics
+      operationId: ipwsGetMobileAppInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsBaseEnvelope'
+                - type: object
+                  properties:
+                    aoWasSessions:
+                      type: array
+                      description: app-usage sessions (WAS = "was app session")
+                      items:
+                        type: object
+                        properties:
+                          dtAppStart: { type: string, format: date-time }
+                          dtAppEnd: { type: string, format: date-time }
+                          aoScreens:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                dtTimestamp: { type: string, format: date-time }
+                                sName: { type: string }
+                                sConfirmationCartId: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Alerts and settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      iCurrentVersionCode: { type: integer }
+                      aoAlerts: { type: array, items: { type: object } }
+                      oSettingsNotificationTrigger: { type: object }
+
+  /IP.svc/InitTckSession:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Start ticket-buy session (returns session/cart data)
+      operationId: ipwsInitTckSession
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Tck session, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckSession:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Set buy-session parameters (connection, passengers, class, doc type)
+      operationId: ipwsSetTckSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iConnIDBack: { type: integer, nullable: true }
+                    iConnHandleBack: { type: integer, nullable: true }
+                    iDocType: { type: integer }
+                    iSelectedOfferIndex: { type: integer }
+                    iVlakPlusActionId: { type: integer, nullable: true }
+                    oClass: { $ref: '#/components/schemas/IpwsPriceRequestClass' }
+                    aoPassenger: { type: array, items: { type: object } }
+      responses:
+        '200':
+          description: Price offers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      aoPriceOffer: { type: array, items: { type: object } }
+                      oPriceData: { $ref: '#/components/schemas/IpwsPriceData' }
+
+  /IP.svc/RepeatTckSession:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Restore an interrupted buy session
+      operationId: ipwsRepeatTckSession
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Restored session, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckPriceOffers:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: List price offers in current buy session
+      operationId: ipwsGetTckPriceOffers
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Offers, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckPriceData:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Detailed price breakdown of the selected offer
+      operationId: ipwsGetTckPriceData
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetPassengerData:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Passenger data for current buy session
+      operationId: ipwsGetPassengerData
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Passengers, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/CheckPassengers:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Validate passengers (age/discount/card checks)
+      operationId: ipwsCheckPassengers
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Check result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckPlaceReservations:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Choose seat reservations (coach/place selection)
+      operationId: ipwsSetTckPlaceReservations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iTrainId: { type: integer }
+                    iType: { type: integer }
+                    sCoachId: { type: string }
+                    aiPlaceNum: { type: array, items: { type: integer } }
+                    iPlaceType: { type: integer }
+                    iNumPlaces: { type: integer }
+                    iCompartmentType: { type: integer }
+                    bBerthTogether: { type: boolean }
+                    iBerthFemaleCount: { type: integer }
+                    iBerthMaleCount: { type: integer }
+                    oBerthFemalePositions: { $ref: '#/components/schemas/IpwsResPositions' }
+                    oBerthMalePositions: { $ref: '#/components/schemas/IpwsResPositions' }
+                    oCouchettePositions: { $ref: '#/components/schemas/IpwsResPositions' }
+                    iSjtResType: { type: integer, nullable: true }
+                    sSjtTicketId: { type: string, nullable: true }
+                    bForSjtTicket: { type: boolean }
+      responses:
+        '200': { description: Reservation result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/TryTckReservePlace:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Try to reserve selected places without committing
+      operationId: ipwsTryTckReservePlace
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Try result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RemoveTckReservations:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Remove placed reservations from buy session
+      operationId: ipwsRemoveTckReservations
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTrainSchemaSellOptions:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Sell options for train schema (seat map)
+      operationId: ipwsGetTrainSchemaSellOptions
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Sell options, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckBikes:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add bicycle transport to buy session
+      operationId: ipwsSetTckBikes
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckBikesPrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Price of bicycle transport
+      operationId: ipwsGetTckBikesPrice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckCatering:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Select catering products
+      operationId: ipwsSetTckCatering
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RemoveTckAdditionalService:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Remove an additional service row
+      operationId: ipwsRemoveTckAdditionalService
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckDogs:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add dog transport
+      operationId: ipwsSetTckDogs
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetDogs:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Dog transport options
+      operationId: ipwsGetDogs
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Dogs, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetDogsPrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Dog transport price
+      operationId: ipwsGetDogsPrice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckLuggage:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add luggage
+      operationId: ipwsSetTckLuggage
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetLuggage:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Luggage options
+      operationId: ipwsGetLuggage
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Luggage, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetLuggagePrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Luggage price
+      operationId: ipwsGetLuggagePrice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckSkis:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add skis transport
+      operationId: ipwsSetTckSkis
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetSkis:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Skis options
+      operationId: ipwsGetSkis
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Skis, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetSkisPrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Skis price
+      operationId: ipwsGetSkisPrice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckInsurance:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add travel insurance to buy session
+      operationId: ipwsSetTckInsurance
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetInsurance:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Insurance options for the session
+      operationId: ipwsGetInsurance
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Insurances, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetInsurancePrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Insurance price quote
+      operationId: ipwsGetInsurancePrice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    dtValidFrom: { type: string, format: date-time }
+                    dtValidTo: { type: string, format: date-time }
+                    aoPassengers:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          sName: { type: string }
+                          sSurname: { type: string }
+                          dtDOB: { type: string }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckParkingVoucher:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Parking-voucher options for the session
+      operationId: ipwsGetTckParkingVoucher
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Vouchers, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckIdentity:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Identity data required for the ticket
+      operationId: ipwsGetTckIdentity
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Identity, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCurrentIdentity:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Current identity attached to the session
+      operationId: ipwsGetCurrentIdentity
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Identity, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ComputeTicketPartial:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Compute partial (subtotal) ticket result
+      operationId: ipwsComputeTicketPartial
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Partial result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTckCdBike:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: ČD Bike rental for buy session
+      operationId: ipwsGetTckCdBike
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Bike data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SetTckCdBike:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add ČD Bike rental to session
+      operationId: ipwsSetTckCdBike
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/PaymentCommonStart:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Start common payment (choose method, identity, discounts, agreement checks)
+      operationId: ipwsPaymentCommonStart
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iPaymentMethod: { type: integer }
+                    iTotalAmount: { type: integer, description: 'price in haléře (1/100 CZK)'}
+                    bCheckApp: { type: boolean }
+                    sCAPIN: { type: string, nullable: true }
+                    aiCheckedAgreementTypeID: { type: array, items: { type: integer } }
+                    oIdentity: { $ref: '#/components/schemas/IpwsPaymentIdentity' }
+                    oDiscountsInfo: { type: object }
+                    oUsedBenefit: { type: object }
+      responses:
+        '200':
+          description: Init result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      oFingerprintSdkInit: { type: object, nullable: true }
+
+  /IP.svc/PaymentCommonInit:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Initialise payment gateway (CSOB/Google Pay/etc.)
+      operationId: ipwsPaymentCommonInit
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200':
+          description: Gateway params (Google Pay object etc.)
+          content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } }
+
+  /IP.svc/PaymentCommonProcess:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Process/verify payment result from gateway
+      operationId: ipwsPaymentCommonProcess
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200':
+          description: Process result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      oAuthenticate: { type: object, nullable: true }
+                      sResultUrl: { type: string, nullable: true }
+
+  /IP.svc/PaymentCommonFinish:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Finalise payment and issue ticket
+      operationId: ipwsPaymentCommonFinish
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200':
+          description: Finish result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      sResultUrl: { type: string }
+
+  /IP.svc/GetRefundSetup:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Prepare refund setup for a ticket
+      operationId: ipwsGetRefundSetup
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Refund setup, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ReturnTicket:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Cancel/return a whole ticket
+      operationId: ipwsReturnTicket
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsRefundCommand' } } } }
+      responses:
+        '200': { description: Refund result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ReturnRailwayTicket:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Cancel/return a railway ticket (different rules)
+      operationId: ipwsReturnRailwayTicket
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsRefundCommand' } } } }
+      responses:
+        '200': { description: Refund result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ReturnTicketPartial:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Partially return a ticket (some passengers/directions)
+      operationId: ipwsReturnTicketPartial
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsRefundCommand' } } } }
+      responses:
+        '200': { description: Refund result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ChangePassengerName:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Change passenger name on a ticket
+      operationId: ipwsChangePassengerName
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsRefundCommand' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ChangePassengersCount:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Change number of passengers on a ticket
+      operationId: ipwsChangePassengersCount
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsRefundCommand' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ChangeReservation:
+    post:
+      tags: [IPWS – Payments & Refunds]
+      summary: Change seat reservation (connection/time/direction)
+      operationId: ipwsChangeReservation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsRefundCommand'
+                - type: object
+                  properties:
+                    iDirection: { type: integer }
+                    iRefundPayment: { type: integer }
+                    sTransCode: { type: string }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetTickets:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Synchronise tickets (delta sync by transaction codes)
+      operationId: ipwsGetTickets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    oSynchronizeParam: { $ref: '#/components/schemas/IpwsSynchronizeTicketsParam' }
+      responses:
+        '200':
+          description: Ticket history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  d:
+                    type: object
+                    properties:
+                      sTransCode: { type: string }
+                      sTransCodeLast: { type: string }
+                      sConfirmationCartId: { type: string, nullable: true }
+                      aoCreated: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoUpdated: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoUser: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoRestored: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoRetCreated: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoRetRestored: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoRetUser: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      aoCreatedForDeletion: { type: array, items: { $ref: '#/components/schemas/IpwsTicketRecord' } }
+                      asInvalidLiftagoCodes: { type: array, items: { type: string } }
+                      asHasCompensation: { type: array, items: { type: string } }
+                      asNotHasCompensation: { type: array, items: { type: string } }
+                      asNotRet: { type: array, items: { type: string } }
+                      asCommuterActivations: { type: array, items: { type: string } }
+                      asCommuterActivationsTransCodes: { type: array, items: { type: string } }
+
+  /IP.svc/RegisterForNotifications:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Register device for train delay / platform notifications
+      operationId: ipwsRegisterForNotifications
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetNotificationList:
+    post:
+      tags: [IPWS – Tickets]
+      summary: List stored notifications
+      operationId: ipwsGetNotificationList
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Notifications, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterConnection:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Watch a searched connection (delay notifications)
+      operationId: ipwsRegisterConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sDesc: { type: string }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/DeregisterConnection:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Stop watching a connection
+      operationId: ipwsDeregisterConnection
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterTrain:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Watch a specific train (delay/platform notifications)
+      operationId: ipwsRegisterTrain
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/DeregisterTrain:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Stop watching a train
+      operationId: ipwsDeregisterTrain
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterRegularConnection:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Watch a regularly travelled connection
+      operationId: ipwsRegisterRegularConnection
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterRegularTrain:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Watch a regularly travelled train
+      operationId: ipwsRegisterRegularTrain
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/RegisterConnOrTrain:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Watch connection or train (generic)
+      operationId: ipwsRegisterConnOrTrain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sDesc: { type: string }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/DeregisterConnOrTrain:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Stop watching connection or train (generic)
+      operationId: ipwsDeregisterConnOrTrain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sDesc: { type: string }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetBaseSharedTickets:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Base list of shared tickets (Vlíček / shared ticket)
+      operationId: ipwsGetBaseSharedTickets
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Shared tickets, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetSharedTicketActivationData:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Activation data for a shared ticket
+      operationId: ipwsGetSharedTicketActivationData
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Activation data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ActivateSharedTicket:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Activate a shared ticket
+      operationId: ipwsActivateSharedTicket
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/DeactivateSharedTicket:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Deactivate a shared ticket
+      operationId: ipwsDeactivateSharedTicket
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/CheckSharedTicketState:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Check shared-ticket state (optional VIK check)
+      operationId: ipwsCheckSharedTicketState
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: State, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetSmsTickets:
+    post:
+      tags: [IPWS – Tickets]
+      summary: List SMS tickets (per city)
+      operationId: ipwsGetSmsTickets
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: SMS tickets, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ActivateIds:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Activate IDS ticket
+      operationId: ipwsActivateIds
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetIKProductSetup:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: IN-Karta product setup for a card number
+      operationId: ipwsGetIKProductSetup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sCardNum: { type: string }
+      responses:
+        '200': { description: Product setup, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCTProductSetup:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Commuter-ticket (časová jízdenka) product setup
+      operationId: ipwsGetCTProductSetup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    sCardNum: { type: string }
+                    iCommuterType: { type: integer }
+      responses:
+        '200': { description: Setup, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCTPrice:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Commuter-ticket price
+      operationId: ipwsGetCTPrice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    oParam: { type: object }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/BuyCTProduct:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Buy commuter ticket
+      operationId: ipwsBuyCTProduct
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCTBaseTicket:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Base (existing) commuter ticket
+      operationId: ipwsGetCTBaseTicket
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Ticket, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ActivateTenDaysCT:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Activate ten-days commuter ticket
+      operationId: ipwsActivateTenDaysCT
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/BuyIKProduct:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Buy an IN-Karta product (selected application)
+      operationId: ipwsBuyIKProduct
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/PairIK:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Pair IN-Karta with the account (card number + card password)
+      operationId: ipwsPairIK
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  required: [sCardNum, sCardPassword]
+                  properties:
+                    sCardNum: { type: string }
+                    sCardPassword: { type: string }
+      responses:
+        '200': { description: Pair result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/PairDuplicateIK:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Pair duplicate IN-Karta
+      operationId: ipwsPairDuplicateIK
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetIKRailwayTicketPrice:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: Railway-ticket price for IN-Karta holders
+      operationId: ipwsGetIKRailwayTicketPrice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    oParam:
+                      type: object
+                      properties:
+                        sFrom: { type: string }
+                        sTo: { type: string }
+                        sTariff: { type: string }
+                        iClass: { type: integer }
+                        dtValidFrom: { type: string }
+                        bHasPupilCard: { type: boolean }
+                        iZTPType: { type: integer, nullable: true }
+                        iViaIndex: { type: integer, nullable: true }
+                        oPassenger: { type: object }
+                        sAppIdent: { type: string }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetIncardHolder1:
+    post:
+      tags: [IPWS – IN-Karta]
+      summary: IN-Karta holder info
+      operationId: ipwsGetIncardHolder1
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Holder, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetSideBuyData:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Side-buy (on-board purchase) data
+      operationId: ipwsGetSideBuyData
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Side-buy data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ProcessSideBuy:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Process a side-buy purchase
+      operationId: ipwsProcessSideBuy
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCdBikeItems:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: ČD Bike items catalogue
+      operationId: ipwsGetCdBikeItems
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Items, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCdBikePrice:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: ČD Bike rental price
+      operationId: ipwsGetCdBikePrice
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Price, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCdBikeRentals:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: ČD Bike rental stations
+      operationId: ipwsGetCdBikeRentals
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Rentals, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/ProcessCdBike:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Create/confirm ČD Bike rental request
+      operationId: ipwsProcessCdBike
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    iRentalId: { type: integer }
+                    iReturnRentalId: { type: integer, nullable: true }
+                    aiItemIds: { type: array, items: { type: integer } }
+                    dtFrom: { type: string, format: date-time }
+                    dtTo: { type: string, format: date-time }
+                    oPassenger:
+                      type: object
+                      properties:
+                        sName: { type: string }
+                        sSurname: { type: string }
+                        sEmail: { type: string }
+                        sPhone: { type: string }
+                        sCity: { type: string }
+                        sStreet: { type: string }
+                        sState: { type: string }
+                        sZip: { type: string }
+                        dtDob: { type: string }
+                    sIkNumber: { type: string, nullable: true }
+                    dtIkDob: { type: string, nullable: true }
+                    sNote: { type: string }
+                    sTicketNumber: { type: string, nullable: true }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/AddNaKlikCard:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Add NaKlik card
+      operationId: ipwsAddNaKlikCard
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/EditNaKlikCard:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Edit NaKlik card
+      operationId: ipwsEditNaKlikCard
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/DeleteNaKlikCard:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Delete NaKlik card
+      operationId: ipwsDeleteNaKlikCard
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/SelectNaKlikCard:
+    post:
+      tags: [IPWS – Buy Process]
+      summary: Select NaKlik card for payment
+      operationId: ipwsSelectNaKlikCard
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetAgreementsUrl:
+    post:
+      tags: [IPWS – Session & Login]
+      summary: URL of a agreement (GDPR/business terms) document
+      operationId: ipwsGetAgreementsUrl
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Agreement URL, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCustomerSatisfactionQuestions:
+    post:
+      tags: [IPWS – Misc]
+      summary: Customer-satisfaction questionnaire definition
+      operationId: ipwsGetCustomerSatisfactionQuestions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IpwsSessionEnvelope'
+                - type: object
+                  properties:
+                    aoAnswers:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          iId: { type: integer }
+                          iAnswer: { type: integer }
+                          iVersion: { type: integer }
+      responses:
+        '200': { description: Questions, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetGoogleWalletPasses:
+    post:
+      tags: [IPWS – Tickets]
+      summary: Google Wallet pass objects for tickets
+      operationId: ipwsGetGoogleWalletPasses
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Passes, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  /IP.svc/GetCARechargeData:
+    post:
+      tags: [IPWS – Tickets]
+      summary: ČD-kredit (customer account) recharge data
+      operationId: ipwsGetCARechargeData
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsSessionEnvelope' } } } }
+      responses:
+        '200': { description: Recharge data, content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } } }
+
+  # =====================================================================
+  # C) CGWS — https://cd-ws.circlegate.com/AndroidService.svc/{path}/
+  # =====================================================================
+
+  /checkversions/:
+    post:
+      tags: [CGWS]
+      summary: Check versions of downloadable/offline data packages
+      operationId: cgwsCheckVersions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CgwsEnvelope' }
+      responses:
+        '200':
+          description: Version nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ErrorCode: { type: integer, description: '0 = OK'}
+                  ErrorMsg: { type: string }
+                  Result:
+                    type: array
+                    items: { $ref: '#/components/schemas/CgwsVersionNode' }
+
+  /ttcatalogue/:
+    post:
+      tags: [CGWS]
+      summary: Offline timetable catalogue (list of downloadable timetables)
+      operationId: cgwsTtCatalogue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CgwsEnvelope'
+                - type: object
+                  properties:
+                    TtIdents: { type: array, items: { type: string } }
+                    AutocompleteOnly: { type: array, items: { type: boolean } }
+                    DeviceToken: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Timetable nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ErrorCode: { type: integer }
+                  ErrorMsg: { type: string }
+                  Result:
+                    type: array
+                    items: { $ref: '#/components/schemas/CgwsTtNode' }
+
+  # =====================================================================
+  # D) Support WS — https://wsandroid.circlegate.com/ServiceContractV7.svc/{path}/
+  # =====================================================================
+
+  /uploadsupportrequestdata/:
+    post:
+      tags: [Support WS]
+      summary: Upload a user problem report (text + attachments metadata)
+      operationId: wsUploadSupportRequestData
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CgwsEnvelope' }
+      responses:
+        '200':
+          description: Report accepted
+          content: { application/json: { schema: { $ref: '#/components/schemas/IpwsDataResponse' } } }
+
+components:
+  securitySchemes: {}
+
+  schemas:
+    # ------------------------------------------------------------------
+    # MapPhone shared enums & objects
+    # ------------------------------------------------------------------
+    MapPhoneStatus:
+      type: string
+      description: |
+        Business status returned by every MapPhone endpoint. The full enum from
+        `cz.odp.mapphonelib.api.MapPhoneStatus` (client also maps transport errors
+        onto NETWORK_ERROR / SERVER_NOT_RESPONDING, which the server never sends).
+      enum:
+        - OK
+        - UNKNOWN
+        - WRONG_DATA
+        - ACCOUNT_ALREADY_EXISTS
+        - ACCOUNT_CREATED_EMAIL_NOT_SENT
+        - ACCOUNT_DOES_NOT_EXIST
+        - ACCOUNT_ALREADY_CONFIRMED
+        - INVALID_ACCOUNT_STATUS
+        - INVALID_ACTIVATION_CODE
+        - INVALID_ACTIVATION_CODE_EMAIL_RESENT
+        - INVALID_ACTIVATION_CODE_EMAIL_RESENT_SENDING_FAILED
+        - WRONG_PIN
+        - TANDEM_BOUND
+        - TANDEM_CREATED_AND_BOUND
+        - DEVICE_UNKNOWN
+        - TANDEM_NOT_BOUND
+        - PIN_CHANGED_SENDING_FAILED
+        - IDENTITY_PACK_LOADING_LIMIT_REACHED
+        - INVALID_CRC
+        - INVALID_CREDENTIALS
+        - NO_SUCH_IDENTITY_PACK
+        - INVALID_IDENTITY_PACK_STATUS
+        - EMAIL_SENDING_FAILED
+        - TANDEM_UNKNOWN
+        - TRY_AGAIN_LATER
+        - CONFIG_ERROR
+        - MAX_ACCOUNTS_FOR_EMAIL_REACHED
+        - PRODUCT_DOES_NOT_EXIST
+        - INVALID_PRODUCT_STATUS
+        - PRODUCT_CANCEL_FAILED
+        - PRODUCT_ID_ALREADY_USED
+        - XML_PARSING_ERROR
+        - PRODUCT_TEMPLATE_DOES_NOT_EXIST
+        - FILE_NOT_FOUND
+        - ACCOUNT_CANNOT_BE_DELETED
+        - CARD_UNKNOWN_IN_POMK
+        - CARD_NOT_PAIRED_IN_AZAK
+        - POMK_CONNECTOIK_INVALIDTYPE
+        - POMK_CONNECTOIK_ISSET
+        - POMK_CONNECTOIK_ISSUE
+        - POMK_CONNECTOIK_STATUS
+        - POMK_CONNECTOIK_TRANSFERTOVIK
+        - POMK_UNKNOWN_ERROR
+        - PHOTO_INVALID
+        - NO_JOURNEY_CONNECTION
+        - PARKING_NOT_AVAILABLE
+        - PARKING_ZONE_DOES_NOT_EXIST
+        - PARKING_TIME_OVERLAP
+        - PARKING_SECURE_INTERVAL
+        - CRWS_ERROR
+        - CRWS_CONN_HANDLE_RELEASED
+        - CARD_UNKNOWN_IN_PORTAL_TELMAX
+        - PORTAL_TELMAX_ERROR
+        - PORTAL_TELMAX_EMAIL_NOT_CONFIRMED
+        - PORTAL_TELMAX_ACCOUNT_TAKEN
+        - IDENTIFIER_UNKNOWN_IN_DNCORE
+        - OAUTH2_TOKENS_INVALID
+        - IDENTITY_PACK_LISTENER_ERROR
+        - MULTIPLE_FACES
+        - NO_FACE
+        - FACE_WRONG_POSITION
+        - OIK_2_VIK_NOT_ALLOWED_IN_POMK
+        - NETWORK_ERROR
+        - TOO_MANY_PRODUCTS_TO_SHOW
+        - SERVER_NOT_RESPONDING
+
+    MapPhoneStatusResult:
+      type: object
+      description: Generic response that carries only the status.
+      required: [Status]
+      properties:
+        Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+
+    MobileAppVersion:
+      type: object
+      properties:
+        Name: { type: string }
+        Platform: { type: string }
+        IsUpdateForced: { type: boolean }
+        IsUpdateRecommended: { type: boolean }
+
+    BindAccountInput:
+      type: object
+      description: |
+        Login for the MapPhone account backend. IMPORTANT: UserName is the
+        **IN-Karta card number** (sCardNum of the card activated in the app),
+        not the e-mail — MapPhoneFragment passes sCardNum from the IK list as
+        the first argument of bindAccount(). PIN is the **ČD e-shop password**
+        (the app prompts "enter the password to your ČD account"). Accounts
+        only exist for users who activated an IN-Karta/VIK in the app; an
+        e-mail in UserName yields Status ACCOUNT_DOES_NOT_EXIST.
+      required: [UserName, DeviceID]
+      properties:
+        UserName: { type: string, description: 'IN-Karta card number (not the e-mail!)'}
+        DeviceID: { type: string, description: 'Installation/device GUID generated by the app'}
+        PushDeviceID: { type: string, nullable: true, description: 'FCM token'}
+        PIN: { type: string, nullable: true, description: 'ČD e-shop password'}
+        DeviceInfo: { type: string, nullable: true }
+
+    BindAccountResult:
+      type: object
+      required: [Status]
+      properties:
+        Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+        PublicKeyXML: { type: string, nullable: true, description: 'XML-encoded account public key'}
+        Email: { type: string, nullable: true }
+        EndOfValidity: { type: string, nullable: true, description: 'yyyyMMdd' }
+
+    DeleteAccountInput:
+      type: object
+      required: [UserName, DeviceID, PIN]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        PIN: { type: string }
+
+    DevicePinAccountInput:
+      type: object
+      required: [UserName, DeviceID, PIN]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        PIN: { type: string }
+
+    NewAccountInput:
+      type: object
+      required: [UserName, Email, PIN]
+      properties:
+        UserName: { type: string }
+        Email: { type: string }
+        PIN: { type: string }
+
+    ConfirmAccountInput:
+      type: object
+      required: [UserName, ValidityCode]
+      properties:
+        UserName: { type: string }
+        ValidityCode: { type: string, description: 'Code from confirmation e-mail'}
+
+    NewConfirmedAccountInput:
+      type: object
+      required: [DeviceID, DeviceInfo, Email, PIN, PushDeviceID, IdentityPackData]
+      properties:
+        DeviceID: { type: string }
+        DeviceInfo: { type: string }
+        Email: { type: string }
+        PIN: { type: string }
+        PrevUsername: { type: string, nullable: true }
+        PushDeviceID: { type: string }
+        DetectFace: { type: boolean, description: 'Server-side face detection on the photo'}
+        IdentityPackData: { $ref: '#/components/schemas/IdentityPackInputData' }
+
+    IdentityPackInputData:
+      type: object
+      description: Digital identity card (name, photo, address…) used for IN-Karta.
+      properties:
+        PhotoHQ: { type: string, description: 'Base64 JPEG'}
+        HolderName: { type: string }
+        HolderBirth: { type: string, nullable: true, description: 'yyyyMMdd' }
+        HolderSex: { type: string, example: MALE }
+        HolderGeoCode: { type: string }
+        HolderState: { type: string }
+        HolderType: { type: integer }
+        PostalCode: { type: integer, nullable: true }
+        PostalCodeTemp: { type: integer, nullable: true }
+        AdditionalInfo: { type: string, nullable: true }
+        ServiceProviderSpecificData: { type: string, nullable: true, description: 'Base64'}
+
+    SetIdentityPackInput:
+      type: object
+      required: [DeviceID, UserName, PIN, IdentityPackData]
+      properties:
+        DeviceID: { type: string }
+        UserName: { type: string }
+        PIN: { type: string }
+        IdentityPackData: { $ref: '#/components/schemas/IdentityPackInputData' }
+        DetectFace: { type: boolean }
+
+    ChangePINInput:
+      type: object
+      required: [UserName, DeviceID, OldPIN, NewPIN]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        OldPIN: { type: string }
+        NewPIN: { type: string }
+
+    ForgottenPINInput:
+      type: object
+      required: [UserName]
+      properties:
+        UserName: { type: string }
+        User: { type: string, nullable: true, description: 'delivery selector'}
+        Password: { type: string, nullable: true, description: 'delivery selector'}
+
+    UpdatePushDeviceIdInput:
+      type: object
+      required: [DeviceID, PushDeviceID]
+      properties:
+        DeviceID: { type: string }
+        PushDeviceID: { type: string }
+
+    PmdpBindExistingInput:
+      type: object
+      required: [Email, DeviceID]
+      properties:
+        Email: { type: string }
+        DeviceID: { type: string }
+        DeviceInfo: { type: string }
+        PhoneName: { type: string }
+        PIN: { type: string }
+        PushDeviceID: { type: string }
+
+    PaymentInfo:
+      type: object
+      description: Payment initiation info (CSOB payment gateway).
+      required: [PaymentMethod, ReturnMethod, ReturnURL]
+      properties:
+        PaymentMethod: { type: string, description: 'e.g. CSOB_GATEWAY, MASTERPASS, GOOGLE_PAY, …'}
+        ReturnMethod: { type: string }
+        ReturnURL: { type: string }
+        Save: { type: boolean, nullable: true }
+
+    PaymentResultInfo:
+      type: object
+      properties:
+        IsOK: { type: boolean, nullable: true }
+        ErrorMessage: { type: string, nullable: true }
+        MPTransactionID: { type: string, nullable: true }
+        CSOBGatewayPayID: { type: string, nullable: true }
+        CSOBGatewayURL: { type: string, nullable: true, description: 'Redirect URL to the CSOB payment gateway'}
+
+    NewExternalProductInput:
+      type: object
+      required: [DeviceID, UserName, TemplateID]
+      properties:
+        DeviceID: { type: string }
+        UserName: { type: string }
+        TemplateID: { type: string }
+        Count: { type: integer, nullable: true }
+        PaymentInfo: { $ref: '#/components/schemas/PaymentInfo' }
+
+    NewParkingViaMasterpassInput:
+      type: object
+      required: [UserName, DeviceID, ParkingZoneID, CarID, BeginDateTime, EndDateTime]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        ParkingZoneID: { type: string }
+        CarID: { type: string, description: 'licence plate'}
+        BeginDateTime: { type: string }
+        EndDateTime: { type: string }
+
+    ComputeJourneyInput:
+      type: object
+      required: [DeviceID, From, To]
+      properties:
+        DeviceID: { type: string }
+        From: { type: string }
+        To: { type: string }
+        Via: { type: string, nullable: true }
+        ProfileID: { type: string, nullable: true }
+
+    ComputeJourneyResult:
+      type: object
+      properties:
+        Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+        Price: { type: string, nullable: true }
+        PriceCurrencyCode: { type: string, nullable: true }
+        Length: { type: string, nullable: true }
+        Stations: { type: array, items: { $ref: '#/components/schemas/JourneyStationItem' } }
+
+    FindJourneyStationsInput:
+      type: object
+      required: [DeviceID, SearchInput]
+      properties:
+        DeviceID: { type: string }
+        SearchInput: { type: string }
+
+    JourneyStationItem:
+      type: object
+      properties:
+        ID: { type: string }
+        Name: { type: string }
+
+    GetJourneyProfilesInput:
+      type: object
+      required: [DeviceID]
+      properties:
+        DeviceID: { type: string }
+
+    JourneyProfileItem:
+      type: object
+      properties:
+        ID: { type: string }
+        Name: { type: string }
+        BasicPrice: { type: string }
+        KmPrice: { type: string }
+
+    NewJourneyTicketInput:
+      type: object
+      required: [UserName, DeviceID, From, To, ProfileID]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        From: { type: string }
+        To: { type: string }
+        Via: { type: string, nullable: true }
+        ProfileID: { type: string }
+
+    SearchCrwsConnectionsInput:
+      type: object
+      required: [DeviceID, From, To, When]
+      properties:
+        DeviceID: { type: string }
+        From: { $ref: '#/components/schemas/TMapyGlobalListItemInfo' }
+        To: { $ref: '#/components/schemas/TMapyGlobalListItemInfo' }
+        When: { type: string, description: 'yyyyMMddHHmm' }
+        IsTimeOfDeparture: { type: boolean }
+
+    NewCrwsJourneyTicketInput:
+      type: object
+      required: [UserName, DeviceID, HandleID, CombID, Connection]
+      properties:
+        UserName: { type: string }
+        DeviceID: { type: string }
+        HandleID: { type: integer }
+        CombID: { type: string }
+        Connection: { $ref: '#/components/schemas/TMapyConnectionInfo' }
+        discountClaim:
+          description: Note — the JSON key really is lowercase "discountClaim".
+          $ref: '#/components/schemas/TMapyDiscountClaim'
+
+    SortimentGroup:
+      type: object
+      properties:
+        Name: { type: string }
+        Items:
+          type: array
+          items: { $ref: '#/components/schemas/SortimentItem' }
+
+    SortimentItem:
+      type: object
+      properties:
+        ID: { type: string }
+        Name: { type: string }
+        Description: { type: string }
+        Price: { type: string }
+        PriceCurrencyCode: { type: string }
+
+    ExternalSortimentItem:
+      type: object
+      properties:
+        ID: { type: string }
+        Data: { type: string }
+        Price: { type: integer, nullable: true }
+        Tag: { type: string }
+        Transferable: { type: boolean, nullable: true }
+        Valid: { type: boolean, nullable: true }
+
+    ParkingZone:
+      type: object
+      properties:
+        ID: { type: string }
+        Name: { type: string }
+        Description: { type: string }
+        QrID: { type: string }
+        OpeningHours:
+          type: array
+          items: { $ref: '#/components/schemas/ParkingZoneOpeningHours' }
+
+    ParkingZoneOpeningHours:
+      type: object
+      properties:
+        DayOfWeek: { type: string }
+        Begin: { type: string }
+        End: { type: string }
+        MinLen: { type: string }
+        Intervals:
+          type: array
+          items: { $ref: '#/components/schemas/ParkingTariffInterval' }
+
+    ParkingTariffInterval:
+      type: object
+      properties:
+        Offset: { type: string }
+        Len: { type: string }
+        MinutePrice: { type: string }
+
+    ProductSync:
+      type: object
+      description: One synchronised purchased product (offline ticket bundle).
+      properties:
+        ProductID: { type: string }
+        ProductType: { type: string }
+        Status: { type: string }
+        Description: { type: string }
+        Data: { type: string, description: 'Base64 product payload'}
+        Signature: { type: string, description: 'Base64 signature over data'}
+        ValidFrom: { type: string, nullable: true, description: 'yyyyMMddHHmm' }
+        ValidTo: { type: string, nullable: true, description: 'yyyyMMddHHmm' }
+        OverrunTo: { type: string, nullable: true, description: 'yyyyMMddHHmm' }
+        WarningPeriod: { type: string, nullable: true }
+        IsTransmitted: { type: boolean, nullable: true }
+        VIS: { type: array, items: { $ref: '#/components/schemas/VIS' } }
+
+    VIS:
+      type: object
+      description: Validate-on-station (VIS) record attached to a product.
+      properties:
+        ID: { type: string }
+        S: { type: string }
+        ValidFrom: { type: string }
+        ValidTo: { type: string }
+
+    TMapyGlobalListItemInfo:
+      type: object
+      description: Reference to a global list item (city, station, address…).
+      properties:
+        ListID: { type: integer, description: '1=CITY, 2=CITYPART, 3=STATIONSEXT, 8=ADDRESS, 9=STATIONS'}
+        Item: { type: integer }
+        Name: { type: string }
+
+    TMapyTimetableObjectInfo:
+      type: object
+      description: A timetable object (station) with its routes.
+      properties:
+        Item: { $ref: '#/components/schemas/TMapyGlobalListItemInfo' }
+        Name: { type: string }
+        Type: { type: string }
+        State: { type: string }
+        Region: { type: string }
+        Lines: { type: string }
+        TrCategory: { type: string }
+        StCount: { type: integer }
+        TrTypeId: { type: array, items: { type: integer } }
+        Stations: { type: array, items: { $ref: '#/components/schemas/TMapyStationInfo' } }
+
+    TMapyStationInfo:
+      type: object
+      properties:
+        Key: { type: integer, format: int64 }
+        Name: { type: string }
+        Station: { type: integer }
+        ReservKey: { type: integer, format: int64 }
+        InfoFile: { type: string }
+        TrTypeId: { type: array, items: { type: integer } }
+
+    TMapyFillConnectionPricesMessage:
+      type: object
+      properties:
+        Handle: { type: integer }
+        CombId: { type: string }
+        ConnInfo: { $ref: '#/components/schemas/TMapyConnectionListInfo' }
+        FromObjects: { type: array, items: { $ref: '#/components/schemas/TMapyTimetableObjectInfo' } }
+        ToObjects: { type: array, items: { $ref: '#/components/schemas/TMapyTimetableObjectInfo' } }
+        ViaObjects: { type: array, items: { $ref: '#/components/schemas/TMapyTimetableObjectInfo' } }
+        ChangeObjects: { type: array, items: { $ref: '#/components/schemas/TMapyTimetableObjectInfo' } }
+
+    TMapyConnectionListInfo:
+      type: object
+      properties:
+        OrigCity: { type: string }
+        DestCity: { type: string }
+        AllowPrev: { type: boolean }
+        AllowNext: { type: boolean }
+        Connections: { type: array, items: { $ref: '#/components/schemas/TMapyConnectionInfo' } }
+
+    TMapyConnectionInfo:
+      type: object
+      properties:
+        Id: { type: integer }
+        CombId: { type: string }
+        TimeLength: { type: string }
+        Distance: { type: string }
+        TmData: { $ref: '#/components/schemas/TMapyConnectionData' }
+        Trains: { type: array, items: { $ref: '#/components/schemas/TMapyConnectionTrainInfo' } }
+        Remarks: { $ref: '#/components/schemas/TMapyRemarksInfo' }
+
+    TMapyConnectionTrainInfo:
+      type: object
+      properties:
+        From: { type: integer }
+        To: { type: integer }
+        DateTime1: { type: string }
+        DateTime2: { type: string }
+        TimeLength: { type: string }
+        Distance: { type: string }
+        Delay: { type: integer }
+        LinkDist: { type: integer }
+        TmData: { $ref: '#/components/schemas/TMapyConnectionTrainData' }
+        TrainData: { $ref: '#/components/schemas/TMapyTrainDataInfo' }
+
+    TMapyConnectionTrainData:
+      type: object
+      properties:
+        Zones: { type: array, items: { type: string } }
+        PriceList: { $ref: '#/components/schemas/TMapyPriceList' }
+
+    TMapyTrainDataInfo:
+      type: object
+      properties:
+        Info: { $ref: '#/components/schemas/TMapyTrainInfo' }
+        Route: { type: array, items: { $ref: '#/components/schemas/TMapyTrainRouteInfo' } }
+        Remarks: { $ref: '#/components/schemas/TMapyRemarksInfo' }
+
+    TMapyTrainInfo:
+      type: object
+      properties:
+        Id: { type: integer }
+        Train: { type: integer }
+        TtIndex: { type: integer }
+        Type: { type: string }
+        TypeName: { type: string }
+        Num1: { type: string }
+        Num2: { type: string }
+        Color: { type: integer }
+        Flags: { type: integer }
+        Info: { type: string }
+
+    TMapyTrainRouteInfo:
+      type: object
+      properties:
+        Station: { $ref: '#/components/schemas/TMapyStationInfo' }
+        ArrTime: { type: string }
+        DepTime: { type: string }
+        ArrCycle: { type: integer }
+        DepCycle: { type: integer }
+        Dist: { type: string }
+        Flags: { type: integer }
+
+    TMapyRemarksInfo:
+      type: object
+      properties:
+        Remarks: { type: array, items: { $ref: '#/components/schemas/TMapyRemarkInfo' } }
+
+    TMapyRemarkInfo:
+      type: object
+      properties:
+        Type: { type: integer }
+        Text: { type: string }
+
+    TMapyConnectionData:
+      type: object
+      properties:
+        Fare: { type: integer }
+        ErrorCode: { type: integer }
+
+    TMapyPriceList:
+      type: object
+      properties:
+        AgeCategories: { type: array, items: { $ref: '#/components/schemas/TMapyAgeCategory' } }
+
+    TMapyAgeCategory:
+      type: object
+      properties:
+        Name: { type: string }
+        Help1: { type: string }
+        IsDefault: { type: boolean, nullable: true }
+        DiscountClaims: { type: array, items: { $ref: '#/components/schemas/TMapyDiscountClaim' } }
+
+    TMapyDiscountClaim:
+      type: object
+      description: Discount claim (sleva) attached to a CRWS ticket purchase.
+      properties:
+        default: { type: integer, description: 'customer profile code (JSON key is "default")'}
+        Name: { type: string }
+        Help2: { type: string }
+        IsDefault: { type: boolean, nullable: true }
+        Ticket: { $ref: '#/components/schemas/TMapyTicket' }
+
+    TMapyTicket:
+      type: object
+      properties:
+        SingleFare: { $ref: '#/components/schemas/TMapySingleFare' }
+
+    TMapySingleFare:
+      type: object
+      properties:
+        Fare: { type: number, nullable: true }
+        FareLabel: { type: string }
+        BicycleFare: { type: number, nullable: true }
+        DogFare: { type: number, nullable: true }
+        LuggageFare: { type: number, nullable: true }
+        WorkDayLimit: { type: integer }
+        OtherDayLimit: { type: integer }
+        TraiffProfile: { type: integer, description: 'sic — typo is in the payload'}
+
+    IDPTariffItem:
+      type: object
+      properties:
+        UIDtarif: { type: integer }
+        NazevTarifu: { type: string }
+        IDCenik: { type: integer }
+        ID_CP: { type: integer }
+        ID_TP: { type: integer }
+        Typ: { type: integer }
+        NavaznaCP: { type: array, items: { type: integer } }
+        NetworkID: { type: integer }
+        ProviderID: { type: integer }
+
+    IdpSearchStationsResultValue:
+      type: object
+      properties:
+        Items: { type: array, items: { $ref: '#/components/schemas/IDPStationItem' } }
+
+    IDPStationItem:
+      type: object
+      properties:
+        UIDzastavky: { type: integer }
+        IDzastavkySR70: { type: integer }
+        NazevCIS: { type: string }
+        Okres: { type: string }
+        Popis: { type: string }
+        Typ: { type: string }
+        IDzona: { type: integer }
+        ZonaTyp: { type: integer }
+
+    IdpComputeJIJFareValue:
+      type: object
+      properties:
+        Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+        TotalPrice: { type: integer, nullable: true }
+        TotalValidity: { type: integer, nullable: true }
+        Count: { type: integer, nullable: true }
+        CP: { type: integer, nullable: true }
+        CPName: { type: string, nullable: true }
+        TP: { type: integer, nullable: true }
+        TPName: { type: string, nullable: true }
+        ZonaOd: { type: integer, nullable: true }
+        ZonaDo: { type: integer, nullable: true }
+        TrasaPopis: { type: string, nullable: true }
+        PovoleneZonyCelkem: { type: array, items: { type: integer } }
+        PovoleneZonyDoQR: { type: array, items: { type: integer } }
+
+    IdpJIJTicketPurchaseInfo:
+      type: object
+      properties:
+        UIDtarif: { type: integer, nullable: true }
+        Count: { type: integer, nullable: true }
+        ValidFrom: { type: string, nullable: true }
+        UserName: { type: string, nullable: true }
+        ZastavkaFrom: { $ref: '#/components/schemas/IDPStationItem' }
+        ZastavkaTo: { $ref: '#/components/schemas/IDPStationItem' }
+        Zona2ZonaID: { type: string, nullable: true }
+
+    IDPZona2ZonaItem:
+      type: object
+      description: One zone-to-zone fare option.
+      properties:
+        ID: { type: string }
+        ZonaPocatecni: { type: integer, description: start zone }
+        ZonaKoncova: { type: integer, description: end zone }
+        CelkemZonyCena: { type: integer, description: total price }
+        PovoleneZony: { type: array, items: { type: integer } }
+        PovoleneZonyPocet: { type: integer }
+        TrasaAlternativni: { type: boolean, nullable: true }
+        TrasaAlternativniPopis: { type: string, nullable: true }
+        VychoziTrasa: { type: boolean, nullable: true }
+        ZahrnutaZonaSParametrem: { type: boolean, nullable: true }
+
+    IkBindExistingInput:
+      type: object
+      required: [DeviceID, IDK]
+      properties:
+        DeviceID: { type: string }
+        IDK: { type: string, description: IN-Karta card number }
+        DeviceInfo: { type: string, nullable: true }
+        Email: { type: string, nullable: true }
+        PIN: { type: string, nullable: true }
+        PushDeviceID: { type: string, nullable: true }
+
+    PmdpBindExistingResult:
+      type: object
+      properties:
+        Status: { $ref: '#/components/schemas/MapPhoneStatus' }
+        PublicKeyXML: { type: string, nullable: true }
+        Token: { type: string, nullable: true }
+        AccessToken: { type: string, nullable: true }
+        RefreshToken: { type: string, nullable: true }
+        UserName: { type: string, nullable: true }
+
+    RefundProductInput:
+      type: object
+      required: [DeviceID, UserName, ProductID]
+      properties:
+        DeviceID: { type: string }
+        UserName: { type: string }
+        ProductID: { type: integer, format: int64 }
+
+    # ------------------------------------------------------------------
+    # IPWS shared
+    # ------------------------------------------------------------------
+    IpwsBaseEnvelope:
+      type: object
+      description: |
+        Base fields added to every IPWS request body. Language codes:
+        0=cs, 1=en, 2=de, 3=sk, 4=pl.
+      properties:
+        iLang:
+          type: integer
+          minimum: 0
+          maximum: 4
+          default: 0
+
+    IpwsSessionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/IpwsBaseEnvelope'
+        - type: object
+          required: [sSessionID]
+          properties:
+            sSessionID: { type: string, description: 'Session id obtained from CreateSession'}
+
+    IpwsCreateSessionRequest:
+      allOf:
+        - $ref: '#/components/schemas/IpwsBaseEnvelope'
+        - type: object
+          required: [sAppID]
+          properties:
+            sAppID:
+              type: string
+              description: >
+                App GUID — the SERVER GATES ON THIS VALUE and only accepts the
+                GUID of the currently published (v32) app:
+                `{A6AB5B3E-8A7E-4E84-9DC8-801561CE886F}`. The older GUID
+                compiled into app releases up to ~2.16.x,
+                `{1532A12E-0D17-4B83-A9BB-8827EAD33F26}`, is rejected by a
+                server-side client filter with error `10000 Neautorizovaný
+                přístup.` before any login logic runs (verified live 2026-09).
+                The GUID per server type is selected in IpwsUtils.getAppId().
+            sUserDesc:
+              type: string
+              description: >
+                Device fingerprint built by IpwsUtils.getUserDesc(), see schema
+                IpwsUserDesc for the exact format.
+            sUser: { type: string, nullable: true }
+            sPwd: { type: string, nullable: true }
+            sToken: { type: string, nullable: true, description: 'Firebase token'}
+            iTokenType: { type: integer, description: '1 = Firebase'}
+            oRegisterNotificationsSettings: { $ref: '#/components/schemas/IpwsRegisterNotificationsSettings' }
+
+    IpwsUserDesc:
+      type: string
+      description: >
+        Device fingerprint, pipe-separated, built by IpwsUtils.getUserDesc():
+        `appVersionCode|sdkVersion|deviceModel|androidId^serial|installId|lang|country|densityDpi|widthPixels|heightPixels|versionName`.
+        On SDK >= 29 androidId/serial are omitted but the '^' separator is always
+        appended; installId is a random UUID generated on first app start
+        (CommonDb.resetInstallId()).
+        Example: `352|34|SM-S918B|^|8f14e45f-1234-5678-9abc-def012345678|cs|CZ|440|1080|2400|2.19.0`
+
+    IpwsRegisterNotificationsSettings:
+      type: object
+      properties:
+        iNotificationMask: { type: integer }
+        iInitialAdvance: { type: integer }
+        iChangeAdvance: { type: integer }
+        iDelayLimit: { type: integer }
+        iGetOffAdvance: { type: integer }
+
+    IpwsDataResponse:
+      type: object
+      description: >
+        Successful IPWS responses carry payload under `d` and optionally a server
+        timestamp `t` (unix seconds). On failure the response instead contains
+        `ExceptionType` + `Message` where Message = `"<code> <text>"`.
+      properties:
+        d:
+          type: object
+          additionalProperties: true
+          description: Command-specific payload (partial for most commands — see description of each path)
+        t: { type: integer, format: int64, description: 'server time, unix seconds'}
+      additionalProperties: true
+
+    IpwsSessionResponse:
+      type: object
+      properties:
+        d:
+          type: object
+          properties:
+            bTest: { type: boolean, description: 'true when connected to a test server' }
+            sSessionID: { type: string }
+            iLoginErr: { type: integer, description: '0 = logged in'}
+            sLoginErr: { type: string, nullable: true }
+            oLoginInfo:
+              type: object
+              nullable: true
+              properties:
+                sEmail: { type: string }
+                sFirstName: { type: string, nullable: true }
+                sSurname: { type: string, nullable: true }
+                sTitleBefore: { type: string, nullable: true }
+                sTitleAfter: { type: string, nullable: true }
+                sPhone: { type: string, nullable: true }
+                sAvatarUrl: { type: string, nullable: true }
+        t: { type: integer, format: int64 }
+
+    IpwsAgreementVersions:
+      type: object
+      properties:
+        aiTypeIds: { type: array, items: { type: integer } }
+        aiVersions: { type: array, items: { type: integer } }
+
+    IpwsPlaceId:
+      type: object
+      description: Place reference (station key, city, address or coordinates).
+      additionalProperties: true
+
+    IpwsPlaceVia:
+      type: object
+      additionalProperties: true
+
+    IpwsSearchConnectionParams:
+      type: object
+      properties:
+        iSearchConnectionFlags: { type: integer }
+        aiTrTypeID: { type: array, items: { type: integer } }
+        iMaxChange: { type: integer, nullable: true }
+        iMinTime: { type: integer, nullable: true }
+        iUseBeds: { type: integer, nullable: true }
+        iCarrier: { type: integer, nullable: true }
+
+    IpwsPriceRequestClass:
+      type: object
+      properties:
+        iClass: { type: integer, description: '1 = 1st, 2 = 2nd class'}
+        bBusiness: { type: boolean }
+
+    IpwsPriceRequestPassenger:
+      type: object
+      properties:
+        iCount: { type: integer }
+        iAge: { type: integer }
+        oPassenger: { type: object, additionalProperties: true }
+
+    IpwsPriceRequest:
+      type: object
+      properties:
+        iDocType: { type: integer }
+        oClass: { $ref: '#/components/schemas/IpwsPriceRequestClass' }
+        aoPassengers: { type: array, items: { $ref: '#/components/schemas/IpwsPriceRequestPassenger' } }
+        iConnIDThere: { type: integer, nullable: true }
+        iConnHandleThere: { type: integer, nullable: true }
+        iVlakPlusActionId: { type: integer, nullable: true }
+
+    IpwsConnectionList:
+      type: object
+      properties:
+        aoConnections: { type: array, items: { $ref: '#/components/schemas/IpwsConnectionInfo' } }
+        bAllowPrev: { type: boolean }
+        bAllowNext: { type: boolean }
+
+    IpwsConnectionInfo:
+      type: object
+      properties:
+        iID: { type: integer }
+        sTimeLength: { type: string }
+        sDistance: { type: string }
+        iFlags: { type: integer }
+        iDelayColor: { type: integer }
+        iOccupancyLevel: { type: integer }
+        iOperationalFlags: { type: integer }
+        sDelay: { type: string, nullable: true }
+        aoTrains: { type: array, items: { type: object } }
+        oPriceOffer: { type: object, nullable: true }
+
+    IpwsPriceData:
+      type: object
+      properties:
+        iPriceHal: { type: integer, description: 'total price in haléře'}
+        bLoyaltyProgram: { type: boolean }
+        iLoyaltyPoints: { type: integer }
+        bHasLoyaltyBonusPoints: { type: boolean }
+
+    IpwsPaymentIdentity:
+      type: object
+      properties:
+        sName: { type: string }
+        sSurname: { type: string }
+        sEmail: { type: string }
+        sPhone: { type: string, nullable: true }
+        dtDOB: { type: string, nullable: true }
+        sCardNum: { type: string, nullable: true }
+        iCardType: { type: integer, nullable: true }
+
+    IpwsRefundCommand:
+      type: object
+      description: >
+        Refund commands carry an `oRefundData` object (iRefundType, sTransCode,
+        oSynchronizeParam) plus per-refund-type fields; reconstructed only partially.
+      additionalProperties: true
+
+    IpwsResPositions:
+      type: object
+      description: Berth position preferences (bottom/middle/top counts).
+      properties:
+        iBottom: { type: integer }
+        iMiddle: { type: integer }
+        iTop: { type: integer }
+
+    IpwsSynchronizeTicketsParam:
+      type: object
+      description: Delta-sync parameters for GetTickets.
+      properties:
+        sTransCodeLast: { type: string, nullable: true }
+        asTransCodes: { type: array, items: { type: string } }
+        asRetTransCodes: { type: array, items: { type: string } }
+        asLiftagoCodes: { type: array, items: { type: string } }
+        asHasCompensationTransCodes: { type: array, items: { type: string } }
+        asLastChange: { type: array, items: { type: string } }
+
+    IpwsTicketRecord:
+      type: object
+      properties:
+        sTransCode: { type: string }
+        sDesc: { type: string }
+        sDocName: { type: string, nullable: true }
+        sCardName: { type: string, nullable: true }
+        sCardType: { type: string, nullable: true }
+        sEmail: { type: string, nullable: true }
+        sIkNum: { type: string, nullable: true }
+        sAzakID: { type: string, nullable: true }
+        sProductCategory: { type: string, nullable: true }
+        sCommuterBaseTransCode: { type: string, nullable: true }
+        sCommuterActivations: { type: string, nullable: true }
+        sReturnReason: { type: string, nullable: true }
+        sLastChange: { type: string, nullable: true }
+        dtDate: { type: string, format: date-time, nullable: true }
+        iFlags: { type: integer }
+        iBackDayDiff: { type: integer }
+        iCommuterType: { type: integer }
+        oFrom: { $ref: '#/components/schemas/IpwsTicketStation' }
+        oTo: { $ref: '#/components/schemas/IpwsTicketStation' }
+        aoThere: { type: array, items: { $ref: '#/components/schemas/IpwsTicketTrain' } }
+        aoBack: { type: array, items: { $ref: '#/components/schemas/IpwsTicketTrain' } }
+        aoVia: { type: array, items: { type: object } }
+        aoChange: { type: array, items: { type: object } }
+        aoData: { type: array, items: { type: object } }
+      additionalProperties: true
+
+    IpwsTicketStation:
+      type: object
+      properties:
+        iStationKey: { type: integer }
+        sStationName: { type: string }
+        dtTime: { type: string, format: date-time, nullable: true }
+
+    IpwsTicketTrain:
+      type: object
+      properties:
+        sTrainNum: { type: string }
+        sTrainName: { type: string }
+        sTrainType: { type: string }
+        oFrom: { $ref: '#/components/schemas/IpwsTicketStation' }
+        oTo: { $ref: '#/components/schemas/IpwsTicketStation' }
+        oTransportDetail: { type: object, nullable: true }
+        aoCoachPlaces: { type: array, items: { type: object } }
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # CGWS
+    # ------------------------------------------------------------------
+    CgwsEnvelope:
+      type: object
+      required: [param]
+      description: >
+        Every CGWS/support call wraps its payload: {"param": {...}} where the
+        inner object always starts with ServiceVersion/AppVersion/AppId/Lang/
+        Country/DensityDpi.
+      properties:
+        param:
+          type: object
+          properties:
+            ServiceVersion: { type: string, example: '1' }
+            AppVersion: { type: string, description: 'versionCode as string'}
+            AppId: { type: string, example: cz.cd.mujvlak.an }
+            Lang: { type: string, example: cs }
+            Country: { type: string, example: CZ }
+            DensityDpi: { type: integer }
+          additionalProperties: true
+
+    CgwsVersionNode:
+      type: object
+      additionalProperties: true
+
+    CgwsTtNode:
+      type: object
+      additionalProperties: true
+
+security: []

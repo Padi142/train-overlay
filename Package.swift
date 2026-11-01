@@ -1,16 +1,24 @@
 // swift-tools-version: 6.2
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
     name: "TrainAlarm",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     targets: [
+        // Data sources (České dráhy IPWS, IDOS) and the ride model. No UI.
+        .target(name: "TrainAlarmKit"),
+        // Menu bar app.
         .executableTarget(
-            name: "TrainAlarm"
+            name: "TrainAlarm",
+            dependencies: ["TrainAlarmKit"]
+        ),
+        .testTarget(
+            name: "TrainAlarmKitTests",
+            dependencies: ["TrainAlarmKit"],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

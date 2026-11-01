@@ -1,0 +1,131 @@
+{
+ "d": {
+  "aoRoute": [
+   {
+    "sStationName": "Turnov",
+    "iKey": 5454300,
+    "dtDepTime": "/Date(1793546700000)/"
+   },
+   {
+    "sStationName": "Příšovice",
+    "iKey": 5454332,
+    "dtDepTime": "/Date(1793547120000)/"
+   },
+   {
+    "sStationName": "Loukov u Mn.Hradiště",
+    "iKey": 5454321,
+    "dtDepTime": "/Date(1793547300000)/"
+   },
+   {
+    "sStationName": "Březina n.Jizerou",
+    "iKey": 5454341,
+    "dtDepTime": "/Date(1793547420000)/"
+   },
+   {
+    "sStationName": "Mnichovo Hradiště",
+    "iKey": 5454351,
+    "dtDepTime": "/Date(1793547780000)/"
+   },
+   {
+    "sStationName": "Bakov n.Jizerou m.",
+    "iKey": 5454371,
+    "dtDepTime": "/Date(1793548320000)/"
+   },
+   {
+    "sStationName": "Bakov n.Jizerou",
+    "iKey": 5454361,
+    "dtArrTime": "/Date(1793548560000)/",
+    "dtDepTime": "/Date(1793548680000)/"
+   },
+   {
+    "sStationName": "Mladá Boleslav hl.n.",
+    "iKey": 5454451,
+    "dtArrTime": "/Date(1793549160000)/",
+    "dtDepTime": "/Date(1793549340000)/"
+   },
+   {
+    "sStationName": "Chotětov",
+    "iKey": 5454481,
+    "dtArrTime": "/Date(1793550000000)/",
+    "dtDepTime": "/Date(1793550120000)/"
+   },
+   {
+    "sStationName": "Kropáčova Vrutice",
+    "iKey": 5454531,
+    "dtArrTime": "/Date(1793550720000)/",
+    "dtDepTime": "/Date(1793550780000)/"
+   },
+   {
+    "sStationName": "Košátky",
+    "iKey": 5454541,
+    "dtDepTime": "/Date(1793550900000)/"
+   },
+   {
+    "sStationName": "Kojovice",
+    "iKey": 5454511,
+    "dtDepTime": "/Date(1793551020000)/"
+   },
+   {
+    "sStationName": "Byšice",
+    "iKey": 5454551,
+    "dtArrTime": "/Date(1793551260000)/",
+    "dtDepTime": "/Date(1793551320000)/"
+   },
+   {
+    "sStationName": "Všetaty",
+    "iKey": 5453014,
+    "dtArrTime": "/Date(1793551500000)/",
+    "dtDepTime": "/Date(1793551740000)/"
+   },
+   {
+    "sStationName": "Tišice",
+    "iKey": 5454706,
+    "dtArrTime": "/Date(1793551920000)/",
+    "dtDepTime": "/Date(1793551980000)/"
+   },
+   {
+    "sStationName": "Neratovice",
+    "iKey": 5454686,
+    "dtArrTime": "/Date(1793552160000)/",
+    "dtDepTime": "/Date(1793552280000)/"
+   },
+   {
+    "sStationName": "Neratovice sídl.",
+    "iKey": 5454688,
+    "dtArrTime": "/Date(1793552340000)/",
+    "dtDepTime": "/Date(1793552400000)/"
+   },
+   {
+    "sStationName": "Praha-Čakovice",
+    "iKey": 5457336,
+    "dtArrTime": "/Date(1793553000000)/",
+    "dtDepTime": "/Date(1793553180000)/"
+   },
+   {
+    "sStationName": "Praha-Vysočany",
+    "iKey": 5457316,
+    "dtDepTime": "/Date(1793553780000)/"
+   },
+   {
+    "sStationName": "Praha hl.n.",
+    "iKey": 5457076,
+    "dtArrTime": "/Date(1793554260000)/",
+    "sStand": "Nást. 1B"
+   }
+  ],
+  "aoTrainPos": [
+   {
+    "sPosition": "Balabenka odbočka",
+    "sActualDep": "1. 11. 2026 17:30",
+    "iDelay": 3,
+    "bDelayAnticipated": false,
+    "bDiversion": false,
+    "bNotDispatched": false,
+    "iNextStation": 19
+   }
+  ],
+  "sNum1": "1555",
+  "sNum2": "Jizera",
+  "sType": "Sp"
+ }
+}
