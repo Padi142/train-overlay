@@ -25,6 +25,9 @@ struct TrainAlarmApp: App {
             MenuBarLabel(ride: store.ride, connectivity: connectivity.state, now: store.now)
         }
         .menuBarExtraStyle(.window)
+        // Without this the window keeps its old height when the content shrinks while
+        // it is open (e.g. a ride ends), leaving the content floating in a tall panel.
+        .windowResizability(.contentSize)
     }
 }
 
