@@ -4,6 +4,7 @@ import TrainAlarmKit
 /// The menu bar window: sign-in, the current ride, or an empty/error state, plus a footer.
 struct ContentView: View {
     let store: RideStore
+    let connectivity: Connectivity
     @State private var isEditingLink = false
 
     var body: some View {
@@ -63,57 +64,93 @@ struct ContentView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
-            Text(status)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-
-            Spacer()
-
-            Button {
-                Task { await store.refresh() }
-            } label: {
-                if store.isRefreshing {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "arrow.clockwise")
-                }
+        WindowFooter(
+            status: status,
+            connectivity: connectivity,
+            isRefreshing: store.isRefreshing,
+            onRefresh: { Task { await store.refresh() } }
+        ) {
+            if store.idosLink != nil {
+                Button("Stop Tracking IDOS Link") { store.clearIdosLink() }
+            } else {
+                Button("Track IDOS Link…") { isEditingLink = true }
             }
-            .frame(width: 16, height: 16)
-            .disabled(store.isRefreshing)
-            .help("Refresh")
-
-            Menu {
-                if store.idosLink != nil {
-                    Button("Stop Tracking IDOS Link") { store.clearIdosLink() }
-                } else {
-                    Button("Track IDOS Link…") { isEditingLink = true }
-                }
-                if let account = store.account {
-                    Divider()
-                    Section(account) {
-                        Button("Sign Out") { store.signOut() }
-                    }
-                }
+            if let account = store.account {
                 Divider()
-                Button("Quit TrainAlarm") { NSApplication.shared.terminate(nil) }
-                    .keyboardShortcut("q")
-            } label: {
-                Image(systemName: "ellipsis.circle")
+                Section(account) {
+                    Button("Sign Out") { store.signOut() }
+                }
             }
-            .menuIndicator(.hidden)
-            .fixedSize()
         }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     private var status: String {
         let source = store.idosLink != nil ? "IDOS link" : "Můj vlak"
         guard let lastUpdated = store.lastUpdated else { return source }
         return "\(source) · updated \(lastUpdated.clockTime)"
+    }
+}
+
+/// Bottom bar: data source and freshness (or connection trouble), refresh and the ⋯ menu.
+struct WindowFooter<MenuItems: View>: View {
+    let status: String
+    let connectivity: Connectivity
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
+    /// Draws the controls as plain icons; `ImageRenderer` can't draw AppKit-backed controls (screenshots).
+    var staticControls = false
+    @ViewBuilder let menuItems: () -> MenuItems
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let symbol = connectivity.symbol, let label = connectivity.label {
+                Label(label, systemImage: symbol)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(connectivity.tint)
+                    .lineLimit(1)
+            } else {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if staticControls {
+                Image(systemName: "arrow.clockwise")
+                Image(systemName: "ellipsis.circle")
+            } else {
+                controls
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var controls: some View {
+        Button(action: onRefresh) {
+            if isRefreshing {
+                ProgressView().controlSize(.mini)
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
+        }
+        .frame(width: 16, height: 16)
+        .disabled(isRefreshing)
+        .help("Refresh")
+
+        Menu {
+            menuItems()
+            Divider()
+            Button("Quit TrainAlarm") { NSApplication.shared.terminate(nil) }
+                .keyboardShortcut("q")
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 }
 
